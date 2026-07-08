@@ -1,0 +1,1 @@
+# Recolector-de-Datos-TinyML-Edge-Impulse-con-XIAO-ESP32-S3-Sense
