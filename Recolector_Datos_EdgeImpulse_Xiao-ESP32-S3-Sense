@@ -1,0 +1,299 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include "esp_http_server.h"
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
+
+// =========================================================================
+// 1. CONFIGURACIÓN DE RED (El "Gafete de Acceso" al módem)
+// =========================================================================
+const char* ssid = "iot";
+const char* password = "12345678";
+
+// =========================================================================
+// 2. PINES DE LA CÁMARA (El "Sistema Nervioso" del sensor de imagen)
+// =========================================================================
+#define PWDN_GPIO_NUM     -1
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM     10  
+#define SIOD_GPIO_NUM     40
+#define SIOC_GPIO_NUM     39
+#define Y9_GPIO_NUM       48  
+#define Y8_GPIO_NUM       11
+#define Y7_GPIO_NUM       12
+#define Y6_GPIO_NUM       14
+#define Y5_GPIO_NUM       16
+#define Y4_GPIO_NUM       18
+#define Y3_GPIO_NUM       17
+#define Y2_GPIO_NUM       15
+#define VSYNC_GPIO_NUM    38
+#define HREF_GPIO_NUM     47
+#define PCLK_GPIO_NUM     13
+
+// =========================================================================
+// 3. PINES DE LA MICRO SD (El "Archivo Muerto")
+// =========================================================================
+#define SD_SCK  7   
+#define SD_MISO 8   
+#define SD_MOSI 9   
+#define SD_CS   21  
+
+int pictureNumber = 1; // Contador global de fotografías
+httpd_handle_t camera_httpd = NULL; 
+
+// =========================================================================
+// ENDPOINT 1: VISUALIZADOR DE FOTOS (El "Proyector")
+// =========================================================================
+esp_err_t ver_foto_handler(httpd_req_t *req) {
+    char buf[50];
+    char id_str[10] = "";
+    
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        httpd_query_key_value(buf, "id", id_str, sizeof(id_str));
+    }
+
+    if (strlen(id_str) == 0) return ESP_FAIL;
+
+    String path = "/muestreo_" + String(id_str) + ".jpg";
+    File file = SD.open(path.c_str(), FILE_READ); 
+    
+    if (!file) return ESP_FAIL; 
+
+    httpd_resp_set_type(req, "image/jpeg"); 
+    uint8_t buffer[1024]; 
+    size_t bytesRead;
+    
+    while ((bytesRead = file.read(buffer, sizeof(buffer))) > 0) {
+        httpd_resp_send_chunk(req, (const char *)buffer, bytesRead);
+    }
+    httpd_resp_send_chunk(req, NULL, 0); 
+    file.close();
+    
+    return ESP_OK;
+}
+
+// =========================================================================
+// ENDPOINT 2: CAPTURA POR LOTES (El "Fotógrafo Automático")
+// =========================================================================
+esp_err_t capture_save_handler(httpd_req_t *req) {
+    int lote = 1; 
+    char buf[100];
+    
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char param[32];
+        if (httpd_query_key_value(buf, "lote", param, sizeof(param)) == ESP_OK) {
+            lote = atoi(param);
+            if (lote < 1) lote = 1;
+            if (lote > 50) lote = 50; 
+        }
+    }
+
+    int fotos_exitosas = 0;
+    String galeria_html = ""; 
+
+    for (int i = 0; i < lote; i++) {
+        camera_fb_t * fb = esp_camera_fb_get();
+        if (!fb) continue; 
+
+        int current_id = pictureNumber;
+        String path = "/muestreo_" + String(current_id) + ".jpg";
+        
+        File file = SD.open(path.c_str(), FILE_WRITE);
+        if (file) {
+            file.write(fb->buf, fb->len);
+            file.close();
+            
+            galeria_html += "<div class='foto-item'>";
+            galeria_html += "<img src='/ver_foto?id=" + String(current_id) + "&r=" + String(millis()) + "'>";
+            galeria_html += "<p>" + path + "</p>";
+            galeria_html += "</div>";
+            
+            pictureNumber++;
+            fotos_exitosas++;
+        }
+        
+        esp_camera_fb_return(fb); 
+        delay(150); 
+    }
+
+    if (fotos_exitosas > 0) {
+        String html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                      "<style>"
+                      "body{text-align:center; font-family:sans-serif; background:#e8f5e9; color:#2e7d32; padding:20px;}"
+                      ".galeria{display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-top: 20px;}"
+                      ".foto-item{background: white; padding: 10px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}"
+                      ".foto-item img{width: 200px; height: 200px; object-fit: cover; border: 2px solid #2e7d32; border-radius: 5px;}"
+                      ".foto-item p{margin: 10px 0 0 0; font-size: 14px; font-weight: bold; color: #555;}"
+                      ".btn-volver{padding:12px 24px; background:#2e7d32; color:white; text-decoration:none; border-radius:5px; font-weight:bold; display:inline-block; margin:20px;}"
+                      "</style></head>"
+                      "<body><h2>¡Lote completado!</h2>"
+                      "<p>Se guardaron <b>" + String(fotos_exitosas) + "</b> fotos en la MicroSD.</p>"
+                      "<a href='/' class='btn-volver'>Tomar otro lote</a>"
+                      "<div class='galeria'>" + galeria_html + "</div>" 
+                      "</body></html>";
+                      
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, html.c_str(), html.length());
+    } else {
+        const char* resp = "<html><body style='text-align:center; margin-top:50px; color:red;'><h1>Error</h1><p>No se pudo guardar el lote.</p><a href='/'>Volver</a></body></html>";
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    }
+    return ESP_OK;
+}
+
+// =========================================================================
+// NUEVO ENDPOINT 3: BORRAR DATASET (El "Servicio de Limpieza")
+// Escanea la tarjeta SD y elimina todas las imágenes que empiecen con
+// "muestreo_" para dejar espacio libre, luego reinicia el contador.
+// =========================================================================
+esp_err_t borrar_fotos_handler(httpd_req_t *req) {
+    File root = SD.open("/");
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    File file = root.openNextFile();
+    int archivos_borrados = 0;
+
+    // Recorremos todos los archivos del directorio principal
+    while (file) {
+        if (!file.isDirectory()) {
+            String fileName = String(file.name());
+            
+            // Si el archivo es parte de nuestro dataset, lo trituramos
+            if (fileName.startsWith("muestreo_") && fileName.endsWith(".jpg")) {
+                String fullPath = "/" + fileName;
+                SD.remove(fullPath.c_str());
+                archivos_borrados++;
+            }
+        }
+        file = root.openNextFile();
+    }
+    
+    // Reiniciamos la memoria del contador global
+    pictureNumber = 1; 
+
+    String html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                  "<style>body{text-align:center; font-family:sans-serif; background:#ffebee; color:#c62828; padding-top:50px;}"
+                  "a{padding:12px 24px; background:#c62828; color:white; text-decoration:none; border-radius:5px; font-weight:bold; display:inline-block; margin-top:20px;}</style></head>"
+                  "<body><h2>¡Dataset eliminado!</h2>"
+                  "<p>Se han borrado <b>" + String(archivos_borrados) + "</b> imágenes de la MicroSD.</p>"
+                  "<p>El contador ha regresado a 1.</p>"
+                  "<a href='/'>Volver al inicio</a>"
+                  "</body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html.c_str(), html.length());
+
+    return ESP_OK;
+}
+
+// =========================================================================
+// ENDPOINT 4: PÁGINA PRINCIPAL (El "Menú de Inicio")
+// Agregamos un botón rojo con alerta de JavaScript para evitar borrados accidentales
+// =========================================================================
+esp_err_t index_handler(httpd_req_t *req) {
+    const char* html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                       "<style>body{text-align:center; font-family:sans-serif; background:#f0f0f0; padding-top:40px;}"
+                       "button{padding:12px 24px; font-size:16px; color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; box-shadow: 0px 4px 6px rgba(0,0,0,0.1); margin-top:15px; margin-right: 10px;}"
+                       ".btn-azul{background:#0056b3;} .btn-azul:active{transform: scale(0.98);}"
+                       ".btn-rojo{background:#d32f2f; margin-top: 40px;} .btn-rojo:active{transform: scale(0.98);}"
+                       "input[type=number]{padding:10px; font-size:16px; width:70px; text-align:center; border: 1px solid #ccc; border-radius:5px;} "
+                       "hr{margin-top:40px; border: 0; border-top: 1px solid #ddd;}</style></head>"
+                       "<body><h2>Recolección para Edge Impulse</h2>"
+                       "<p>Formato configurado: 240x240px</p>"
+                       "<form action='/guardar' method='GET'>" 
+                       "<label for='lote' style='font-size:18px;'>Cantidad de fotos por lote: </label>"
+                       "<input type='number' name='lote' id='lote' value='5' min='1' max='50'><br>"
+                       "<button type='submit' class='btn-azul'>Capturar y Guardar en SD</button>"
+                       "</form>"
+                       "<hr>"
+                       "<!-- Botón de borrado con alerta de confirmación JS -->"
+                       "<form action='/borrar' method='GET' onsubmit=\"return confirm('ATENCIÓN: ¿Estás seguro de que deseas borrar TODAS las fotos del dataset? Esta acción no se puede deshacer.');\">"
+                       "<button type='submit' class='btn-rojo'>Borrar todo el Dataset</button>"
+                       "</form>"
+                       "</body></html>";
+                       
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+}
+
+// =========================================================================
+// CONFIGURACIÓN DEL SERVIDOR WEB
+// =========================================================================
+void startCameraServer() {
+    httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
+    server_config.server_port = 80; 
+
+    if (httpd_start(&camera_httpd, &server_config) == ESP_OK) {
+        httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
+        httpd_uri_t capture_save_uri = { .uri = "/guardar", .method = HTTP_GET, .handler = capture_save_handler, .user_ctx = NULL };
+        httpd_uri_t ver_foto_uri = { .uri = "/ver_foto", .method = HTTP_GET, .handler = ver_foto_handler, .user_ctx = NULL };
+        httpd_uri_t borrar_fotos_uri = { .uri = "/borrar", .method = HTTP_GET, .handler = borrar_fotos_handler, .user_ctx = NULL }; // Nuevo recepcionista
+        
+        httpd_register_uri_handler(camera_httpd, &index_uri);
+        httpd_register_uri_handler(camera_httpd, &capture_save_uri);
+        httpd_register_uri_handler(camera_httpd, &ver_foto_uri);
+        httpd_register_uri_handler(camera_httpd, &borrar_fotos_uri);
+    }
+}
+
+// =========================================================================
+// SETUP (Configuración inicial al encender la placa)
+// =========================================================================
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+    Serial.println("\n--- SISTEMA NATIVO INICIADO ---");
+
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+    if (!SD.begin(SD_CS, SPI)) {
+        Serial.println("Atención: No se detectó MicroSD al iniciar.");
+    } else {
+        Serial.printf("MicroSD detectada. Espacio libre: %llu MB\n", SD.totalBytes() / (1024 * 1024));
+    }
+
+    camera_config_t config;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+    config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM; config.pin_d2 = Y4_GPIO_NUM; config.pin_d3 = Y5_GPIO_NUM;
+    config.pin_d4 = Y6_GPIO_NUM; config.pin_d5 = Y7_GPIO_NUM; config.pin_d6 = Y8_GPIO_NUM; config.pin_d7 = Y9_GPIO_NUM;
+    config.pin_xclk = XCLK_GPIO_NUM; config.pin_pclk = PCLK_GPIO_NUM; config.pin_vsync = VSYNC_GPIO_NUM;
+    config.pin_href = HREF_GPIO_NUM; config.pin_sccb_sda = SIOD_GPIO_NUM; config.pin_sccb_scl = SIOC_GPIO_NUM;
+    config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
+    
+    config.xclk_freq_hz = 10000000; 
+    config.frame_size = FRAMESIZE_240X240; 
+    config.pixel_format = PIXFORMAT_JPEG; 
+    config.fb_location = CAMERA_FB_IN_PSRAM; 
+    config.jpeg_quality = 12; 
+    config.grab_mode = CAMERA_GRAB_LATEST; 
+    config.fb_count = 2; 
+
+    if (esp_camera_init(&config) != ESP_OK) {
+        Serial.println("Error crítico: Falló la inicialización de la cámara");
+        return;
+    }
+    Serial.println("Cámara iniciada correctamente.");
+
+    Serial.print("Conectando a la red WiFi ");
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi conectado.");
+
+    startCameraServer();
+    Serial.println("=========================================");
+    Serial.print("Servidor web listo en: http://");
+    Serial.println(WiFi.localIP());
+    Serial.println("=========================================");
+}
+
+void loop() {
+    delay(10000); 
+}
