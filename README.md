@@ -51,9 +51,71 @@ Durante el diseño de esta práctica se resolvieron los siguientes conflictos cl
 * **Asfixia de Búfer:** Se habilitó `CAMERA_GRAB_LATEST` y `fb_count = 2` para asegurar que el procesador siempre tenga un "escritorio de trabajo" con una imagen fresca disponible.
 
 ---
+
 ## 🧹 Gestión de Memoria Integrada
 
 El sistema ahora cuenta con un endpoint adicional de limpieza de datos (`/borrar`) diseñado para iterar sobre la estructura de archivos FAT32.
 Al presionar el botón de eliminación en la página principal, el ESP32 abrirá el directorio raíz, identificará mediante filtrado de *strings* exclusivamente los archivos que correspondan al formato del dataset (`muestreo_*.jpg`) y los eliminará. Al finalizar, restablecerá el puntero global de numeración (`pictureNumber`) a 1, permitiendo al usuario iniciar una nueva recolección de datos sin necesidad de manipular físicamente la tarjeta de memoria.
+
 ---
-*Desarrollado para la academia TIC - Prácticas de Internet de las Cosas (IoT).*
+
+## 🧠 Integración con Edge Impulse (Flujo de Trabajo TinyML)
+
+Una vez que hayas recolectado tu *Dataset* en la tarjeta MicroSD utilizando nuestra interfaz web, el siguiente paso es entrenar un modelo de clasificación visual y desplegarlo de vuelta en el hardware.
+
+### 1. Carga de Datos (Data Acquisition)
+Dado que nuestras imágenes ya están pre-procesadas (240x240 px, JPEG) gracias al código del ESP32, usaremos el método de carga directa:
+1. Extrae la MicroSD de la placa XIAO y conéctala a tu computadora.
+2. Inicia sesión en [Edge Impulse Studio](https://studio.edgeimpulse.com/) y crea un nuevo proyecto.
+3. Dirígete a la pestaña **Data acquisition** y haz clic en el botón **Upload data**.
+4. Selecciona los archivos `muestreo_*.jpg` de tu SD.
+5. Asigna una etiqueta (*Label*) correspondiente a la clase de ese lote (ej. `manzana`, `defecto`, `vacio`) y asegúrate de que el destino sea **Training** (o deja que el sistema haga un split automático). Haz clic en **Upload data**.
+
+### 2. Diseño del Modelo (Impulse Design)
+Con los datos cargados, debemos definir la arquitectura del modelo de Machine Learning:
+1. Ve a **Impulse design > Create impulse**.
+2. **Image data:** Ajusta la resolución. Aunque recolectamos en 240x240, para inferencia rápida en el ESP32-S3 se recomienda redimensionar a `96 x 96` px (modo *Squash*).
+3. **Processing block:** Selecciona **Image**.
+4. **Learning block:** Selecciona **Transfer Learning (Images)**.
+5. Guarda el *Impulse*.
+
+### 3. Procesamiento y Entrenamiento
+1. **Generate Features:** Ve a *Image* en el menú lateral. Selecciona *Color depth: RGB*, guarda los parámetros y haz clic en **Generate features**. Aquí podrás ver el explorador 3D para verificar si tus clases son linealmente separables.
+2. **Transfer Learning:** Ve a la pestaña de entrenamiento. Selecciona el modelo pre-entrenado (recomendado: **MobileNetV2 96x96 0.1** para sistemas embebidos de bajos recursos). Define los ciclos de entrenamiento (*Epochs*) y la tasa de aprendizaje (*Learning Rate*), y haz clic en **Start training**.
+3. Al finalizar, revisa la **Matriz de Confusión** (*Confusion Matrix*) para evaluar la precisión (*Accuracy*) del modelo.
+
+### 4. Despliegue (Deployment) como Librería de Arduino
+Una vez satisfecho con el rendimiento del modelo, vamos a empaquetarlo para nuestra placa XIAO:
+1. Dirígete a **Deployment** en el menú de Edge Impulse.
+2. Selecciona **Arduino Library** bajo la sección de *Deploy your impulse*.
+3. (Opcional) Activa el compilador EON (*EON Compiler*) para optimizar el uso de memoria RAM/Flash.
+4. Haz clic en **Build** y descarga el archivo `.zip` generado.
+
+---
+
+## 💻 Implementación de la Inferencia en la XIAO ESP32-S3
+
+Para que el modelo procese imágenes en tiempo real directamente en la placa, debemos integrar la librería generada con el entorno de desarrollo:
+
+1. **Instalar la librería:** En Arduino IDE, ve a *Sketch > Include Library > Add .ZIP Library...* y selecciona el archivo descargado de Edge Impulse.
+2. **Cargar el ejemplo:** Ve a *File > Examples > [Nombre de tu Proyecto Edge Impulse] > esp32 > esp32_camera*.
+3. **Configuración Crítica de Pines de Cámara:**
+   El código de ejemplo viene configurado por defecto para la placa "AI Thinker". Debes modificar las definiciones al inicio del código para habilitar los pines correctos de la XIAO ESP32-S3 Sense. Busca la sección de `#define` y déjala exactamente así:
+
+   ```cpp
+   // Selecciona el modelo de cámara correcto comentando los demás
+   //#define CAMERA_MODEL_WROVER_KIT
+   //#define CAMERA_MODEL_ESP_EYE
+   //#define CAMERA_MODEL_M5STACK_PSRAM
+   //#define CAMERA_MODEL_M5STACK_WIDE
+   //#define CAMERA_MODEL_AI_THINKER
+   #define CAMERA_MODEL_XIAO_ESP32S3 // <--- DESCOMENTAR ESTA LÍNEA
+   ´´´
+
+## 💻 Paso 4: Compilación y Carga
+Manteniendo las mismas configuraciones de hardware en Arduino IDE usadas durante la recolección de datos (OPI PSRAM activado, QIO 80MHz), compila y sube el código a la placa.
+
+## 💻 Paso 5: Prueba en Vivo
+Abre el Serial Monitor a 115200 baudios. El ESP32 tomará fotos continuamente, ejecutará la red neuronal y mostrará en consola el porcentaje de coincidencia con cada una de tus etiquetas (inferencia).
+
+Desarrollado para la academia TIC - Prácticas de Internet de las Cosas (IoT).
